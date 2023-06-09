@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Subset, ConcatDataset
 
-# sys.path.append('src')
+sys.path.append('src')
 import src.backbones as backbones
 import src.common as common
 import src.metrics as metrics
@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--log_project", type=str, default="project")
     parser.add_argument("--log_group", type=str, default="group")
     parser.add_argument("--save_segmentation_images", action='store_true')
+    parser.add_argument("--save_model", action='store_true')
     # backbone
     parser.add_argument("--backbone_names", "-b", type=str, action='append', default=['wideresnet50'])
     parser.add_argument("--layers_to_extract_from", "-le", type=str, action='append', default=['layer2', 'layer3'])
@@ -96,10 +97,17 @@ def get_dataloaders(args):
         )
 
         if noise >= 0:
-            anomaly_index = [index for index in range(len(test_dataset)) if test_dataset[index]["is_anomaly"]]
+            anomaly_index = [
+                index 
+                for index 
+                in range(len(test_dataset)) 
+                if test_dataset[index]["is_anomaly"]
+            ]
             train_length = len(train_dataset)
             noise_number = int(noise * train_length)
-            LOGGER.info("{} anomaly samples are being added into train dataset as noise.".format(noise_number))
+            LOGGER.info(
+                "{} anomaly samples are being added into train dataset as noise.".format(
+                    noise_number))
 
             noise_index_path = Path("noise_index" + "/" + str(args.dataset) + "_noise"
                                     + str(noise) + "_fold" + str(fold))
@@ -110,6 +118,8 @@ def get_dataloaders(args):
                 noise_index = torch.load(path)
                 assert len(noise_index) == noise_number
             else:
+                len_anomaly_index = len(anomaly_index)
+                print(f'Sampling {noise_number} from {len_anomaly_index}')
                 noise_index = random.sample(anomaly_index, noise_number)
                 torch.save(noise_index, path)
 
@@ -210,7 +220,7 @@ def run(args):
 
     seed = args.seed
     run_save_path = utils.create_storage_folder(
-        args.results_path, args.log_project, args.log_group, mode="iterate"
+        args.results_path, args.log_project, args.log_group, mode="overwrite"
     )
 
     list_of_dataloaders = get_dataloaders(args)
@@ -296,16 +306,21 @@ def run(args):
             segmentations = (segmentations - min_scores) / (max_scores - min_scores)
             segmentations = np.mean(segmentations, axis=0)
 
-            # anomaly_labels = [
-            #     x[1] != "good" for x in dataloaders["testing"].dataset.data_to_iterate
-            # ]
-
             test_end = time.time()
             LOGGER.info("Training time:{}, Testing time:{}".format(train_end - start_time, test_end - train_end))
+            
+            sel_idxs = []
+            for i in range(len(masks_gt)):
+                if np.sum(masks_gt[i]) > 0:
+                    sel_idxs.append(i)            
+            anom_result = pixel_scores = metrics.compute_pixelwise_retrieval_metrics(
+                [segmentations[i] for i in sel_idxs],
+                [masks_gt[i] for i in sel_idxs],
+            )
+            optimal_threshold = anom_result['optimal_threshold']    
 
             # (Optional) Plot example images.
             if args.save_segmentation_images:
-                # dataset = dataloaders["testing"].dataset
                 image_paths = [
                     x[2] for x in
                     dataloaders["testing"].dataset.dataset.data_to_iterate[dataloaders["testing"].dataset.indices]
@@ -342,43 +357,47 @@ def run(args):
                     mask_paths,
                     image_transform=image_transform,
                     mask_transform=mask_transform,
-                    # dataset=dataset
+                    optimal_threshold=optimal_threshold
                 )
 
             LOGGER.info("Computing evaluation metrics.")
+            result = {
+                    "dataset_name": dataset_name,
+            }
             auroc = metrics.compute_imagewise_retrieval_metrics(
                 scores, labels_gt
             )["auroc"]
+            result['instance_auroc'] = auroc
 
             # Compute PRO score & PW Auroc for all images
             pixel_scores = metrics.compute_pixelwise_retrieval_metrics(
                 segmentations, masks_gt
             )
-            full_pixel_auroc = pixel_scores["auroc"]
+            # full_pixel_auroc = pixel_scores["auroc"]
+            result = {**result, **{'full_pixel_'+k: v for k,v in pixel_scores.items()}}    
 
             # Compute PRO score & PW Auroc only images with anomalies
-            # sel_idxs = []
-            # for i in range(len(masks_gt)):
-            #     if np.sum(masks_gt[i]) > 0:
-            #         sel_idxs.append(i)
-            # pixel_scores = coreset.metrics.compute_pixelwise_retrieval_metrics(
-            #     [segmentations[i] for i in sel_idxs],
-            #     [masks_gt[i] for i in sel_idxs],
-            # )
-            # anomaly_pixel_auroc = pixel_scores["auroc"]
-
-            result_collect.append(
-                {
-                    "dataset_name": dataset_name,
-                    "image_auroc": auroc,
-                    "pixel_auroc": full_pixel_auroc,
-                    # "anomaly_pixel_auroc": anomaly_pixel_auroc,
-                }
+            pixel_scores = metrics.compute_pixelwise_retrieval_metrics(
+                [segmentations[i] for i in sel_idxs],
+                [masks_gt[i] for i in sel_idxs],
             )
+            result = {**result, **{'anomaly_'+k: v for k,v in pixel_scores.items()}}
+
+            result_collect.append(result)
 
             for key, item in result_collect[-1].items():
                 if key != "dataset_name":
-                    LOGGER.info("{0}: {1:4.4f}".format(key, item))
+                    LOGGER.info("{}: {}".format(key, item))
+
+            # (Optional) Store PatchCore model for later re-use.
+            # SAVE all  only if mean_threshold is passed?
+            if args.save_model:
+                save_path = os.path.join(
+                    run_save_path, "models", dataset_name
+                )
+                os.makedirs(save_path, exist_ok=True)
+                for i, Model in enumerate(coreset_list):
+                    Model.save_to_path(save_path)
 
         LOGGER.info("\n\n-----\n")
 
