@@ -9,6 +9,7 @@ from pathlib import Path
 import argparse
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import Subset, ConcatDataset
 
@@ -37,8 +38,8 @@ def parse_args():
     parser.add_argument("--save_segmentation_images", action='store_true')
     parser.add_argument("--save_model", action='store_true')
     # backbone
-    parser.add_argument("--backbone_names", "-b", type=str, action='append', default=['wideresnet50'])
-    parser.add_argument("--layers_to_extract_from", "-le", type=str, action='append', default=['layer2', 'layer3'])
+    parser.add_argument("--backbone_names", "-b", type=str, action='append', default=[])
+    parser.add_argument("--layers_to_extract_from", "-le", type=str, action='append', default=[])
     # coreset sampler
     parser.add_argument("--sampler_name", type=str, default="approx_greedy_coreset")
     parser.add_argument("--sampling_ratio", type=float, default=0.1)
@@ -60,6 +61,11 @@ def parse_args():
     parser.add_argument("--overlap", action='store_true')
     parser.add_argument("--noise_augmentation", action='store_true')
     parser.add_argument("--fold", type=int, default=0)
+    # decision
+    parser.add_argument(
+        "--decision_threshold_type", type=str, choices=['anomaly', 'full_pixel'],
+        default='full_pixel'
+    )
 
     args = parser.parse_args()
     return args
@@ -178,7 +184,9 @@ def get_coreset(args, imagesize, sampler, device):
     backbone_names = list(args.backbone_names)
     if len(backbone_names) > 1:
         layers_to_extract_from_coll = [[] for _ in range(len(backbone_names))]
+        print('args.layers_to_extract_from', args.layers_to_extract_from)
         for layer in args.layers_to_extract_from:
+            print('layer', layer)
             idx = int(layer.split(".")[0])
             layer = ".".join(layer.split(".")[1:])
             layers_to_extract_from_coll[idx].append(layer)
@@ -222,6 +230,7 @@ def run(args):
     run_save_path = utils.create_storage_folder(
         args.results_path, args.log_project, args.log_group, mode="overwrite"
     )
+    print('saving to root folder', run_save_path)
 
     list_of_dataloaders = get_dataloaders(args)
 
@@ -249,8 +258,6 @@ def run(args):
         )
         start_time = time.time()
         utils.fix_seeds(seed, device)
-
-
 
         with device_context:
             torch.cuda.empty_cache()
@@ -307,27 +314,38 @@ def run(args):
             segmentations = np.mean(segmentations, axis=0)
 
             test_end = time.time()
-            LOGGER.info("Training time:{}, Testing time:{}".format(train_end - start_time, test_end - train_end))
+            LOGGER.info("Training time:{}, Testing time:{}".format(
+                train_end - start_time, test_end - train_end))
             
             sel_idxs = []
             for i in range(len(masks_gt)):
                 if np.sum(masks_gt[i]) > 0:
                     sel_idxs.append(i)            
-            anom_result = pixel_scores = metrics.compute_pixelwise_retrieval_metrics(
-                [segmentations[i] for i in sel_idxs],
-                [masks_gt[i] for i in sel_idxs],
-            )
-            optimal_threshold = anom_result['optimal_threshold']    
+            if args.decision_threshold_type == 'anomaly':
+                anom_result = pixel_scores = metrics.compute_pixelwise_retrieval_metrics(
+                    [segmentations[i] for i in sel_idxs],
+                    [masks_gt[i] for i in sel_idxs],
+                )
+                optimal_threshold = anom_result['optimal_threshold']    
 
+            elif args.decision_threshold_type == 'full_pixel':
+                full_pixel_result = metrics.compute_pixelwise_retrieval_metrics(
+                    segmentations, masks_gt
+                )
+                optimal_threshold = full_pixel_result['optimal_threshold']
+            
+            print('Using Optimal Threshold to Decision:', optimal_threshold)
             # (Optional) Plot example images.
             if args.save_segmentation_images:
                 image_paths = [
                     x[2] for x in
-                    dataloaders["testing"].dataset.dataset.data_to_iterate[dataloaders["testing"].dataset.indices]
+                    dataloaders["testing"].dataset.dataset.data_to_iterate[dataloaders[
+                        "testing"].dataset.indices]
                 ]
                 mask_paths = [
                     x[3] for x in
-                    dataloaders["testing"].dataset.dataset.data_to_iterate[dataloaders["testing"].dataset.indices]
+                    dataloaders["testing"].dataset.dataset.data_to_iterate[dataloaders[
+                        "testing"].dataset.indices]
                 ]
 
                 def image_transform(image):
@@ -389,7 +407,7 @@ def run(args):
                 if key != "dataset_name":
                     LOGGER.info("{}: {}".format(key, item))
 
-            # (Optional) Store PatchCore model for later re-use.
+            # (Optional) Store model for later re-use.
             # SAVE all  only if mean_threshold is passed?
             if args.save_model:
                 save_path = os.path.join(
@@ -416,4 +434,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     LOGGER.info("Command line arguments: {}".format(" ".join(sys.argv)))
     args = parse_args()
+    if not args.backbone_names:
+        args.backbone_names = ['wideresnet50']
+    if not args.layers_to_extract_from:
+        args.layers_to_extract_from = ['layer2', 'layer3']
+    inputs_path = os.path.join(args.log_project, args.log_group, 'args.csv')
+    print('saving inputs to', inputs_path)
+    pd.DataFrame([[arg] for arg in sys.argv]).to_csv(inputs_path, index=False, header=False)
     run(args)
