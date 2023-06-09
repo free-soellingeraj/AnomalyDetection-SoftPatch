@@ -134,6 +134,8 @@ class MVTecDataset(torch.utils.data.Dataset):
 
             for anomaly in anomaly_types:
                 anomaly_path = os.path.join(classpath, anomaly)
+                if anomaly[0] == '.': continue
+                if 'dvc' in anomaly: continue
                 anomaly_files = sorted(os.listdir(anomaly_path))
                 imgpaths_per_class[classname][anomaly] = [
                     os.path.join(anomaly_path, x) for x in anomaly_files
