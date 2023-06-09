@@ -22,6 +22,7 @@ def plot_segmentation_images(
     image_transform=lambda x: x,
     mask_transform=lambda x: x,
     save_depth=2,
+    optimal_threshold=0.5
     # dataset = None
 ):
     """Generate anomaly segmentation images.
@@ -64,17 +65,20 @@ def plot_segmentation_images(
         else:
             mask = np.zeros_like(image)
     # '''
+        seg_threshold = optimal_threshold
         savename = image_path.split("/")
         savename = "_".join(savename[-save_depth:])
         savename = os.path.join(savefolder, savename)
-        figure, axes = plt.subplots(1, 2 + int(masks_provided))
+        figure, axes = plt.subplots(1, 4 + int(masks_provided))
         axes[0].imshow(image.transpose(1, 2, 0))
-        # axes[2].imshow(segmentation)
-        axes[1].imshow(image.transpose(1, 2, 0), alpha=1)
-        axes[1].imshow(segmentation, alpha=0.5)
-        axes[2].imshow(mask.transpose(1, 2, 0))
-        figure.suptitle("Anomaly Score: {:.3f}".format(anomaly_score))
-        figure.set_size_inches(3 * (2 + int(masks_provided)), 3)
+        axes[1].imshow(segmentation, vmin=0, vmax=1,cmap=plt.cm.jet)
+        axes[2].imshow(image.transpose(1, 2, 0), alpha=1)
+        axes[2].imshow(segmentation, vmin=0, vmax=1,cmap=plt.cm.jet, alpha=0.4)
+        axes[3].imshow(mask.transpose(1, 2, 0))
+        axes[4].imshow((segmentation >= seg_threshold).astype(int)*255)
+        figure.suptitle("Anomaly Score: {:.3f} Threshold: {:.3f}".format(
+            anomaly_score, seg_threshold))
+        figure.set_size_inches(3 * (4 + int(masks_provided)), 3)
         figure.tight_layout()
         figure.savefig(savename, dpi=300)
         plt.close()
